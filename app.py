@@ -4,6 +4,10 @@
 """
 from flask import Flask, request, render_template_string, session, redirect, url_for
 import os
+import json
+
+# 记录已使用授权码的文件路径
+USED_CODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'used_codes.json')
 
 # --- 初始化 Flask 应用 ---
 app = Flask(__name__)
@@ -14,18 +18,37 @@ app.secret_key = os.urandom(24)
 # ① 核心数据：授权码库 和 测试题库
 # ==========================================
 # 字典：键是授权码，值是布尔值（True表示未被使用，False表示已用过）
-VALID_CODES = {
-    "ABC123": True,
-    "XYZ789": True,
-    "LIT456": True,
-    "QWE777": True,
-    "ART888": True,
-    "POE999": True,
-    "SHA555": True,
-    "DAN222": True,
-    "AUS333": True,
-    "TOL444": True,
-}
+# 管理员万能码：永远有效，不消耗
+ADMIN_CODE = "ADMIN0"
+# 管理员后台密码
+ADMIN_PASSWORD = "mmlzy123"  # 改成你自己的
+VALID_CODES = [
+    "ABC123",
+    "XYZ789",
+    "LIT456",
+    "QWE777",
+    "ART888",
+    "POE999",
+    "SHA555",
+    "DAN222",
+    "AUS333",
+    "TOL444",
+]
+
+def load_used_codes():
+    """从文件读取已使用的授权码集合"""
+    try:
+        with open(USED_CODES_FILE, 'r') as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+def save_used_code(code):
+    """将一个授权码追加到已使用文件"""
+    used = load_used_codes()
+    used.add(code)
+    with open(USED_CODES_FILE, 'w') as f:
+        json.dump(list(used), f)
 
 # 测试题目列表。每道题是一个字典，包含题目、选项，以及每个选项对应的分数
 QUESTIONS = [
@@ -194,7 +217,7 @@ TEST_PAGE = BASE_STYLE + """
             <p>{{ q.question }}</p>
             {% for option_text, option_score in q.options %}
             <label>
-                <input type="radio" name="q{{ loop.index0 }}" value="{{ option_score }}" required> 
+                <input type="radio" name="q{{ questions.index(q) }}" value="{{ option_score }}" required> 
                 {{ option_text }}
             </label>
             {% endfor %}
@@ -204,7 +227,60 @@ TEST_PAGE = BASE_STYLE + """
     </form>
 </div>
 """
-
+# 管理员后台页面
+ADMIN_PAGE = BASE_STYLE + """
+<div class="container">
+    <h1>LITERA · 管理后台</h1>
+    <div style="margin-bottom:20px; padding:15px; background:#f9f6f0; border-radius:2px;">
+        <h3 style="margin-top:0;">📊 授权码状态</h3>
+        <table style="width:100%; border-collapse:collapse;">
+            <tr style="border-bottom:1px solid #d4c9b5;">
+                <th style="padding:8px; text-align:left;">授权码</th>
+                <th style="padding:8px; text-align:center;">状态</th>
+                <th style="padding:8px; text-align:center;">操作</th>
+            </tr>
+            {% for info in code_list %}
+            <tr style="border-bottom:1px dotted #e8e0d5;">
+                <td style="padding:8px;">{{ info.code }}</td>
+                <td style="padding:8px; text-align:center;">
+                    {% if info.used %}
+                    <span style="color:#b85c5c;">已使用</span>
+                    {% else %}
+                    <span style="color:#6a9a6a;">可用</span>
+                    {% endif %}
+                </td>
+                <td style="padding:8px; text-align:center;">
+                    {% if info.used %}
+                    <a href="?action=reset_one&code={{ info.code }}" style="color:#5a4e3c;">重置</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    
+    <div style="margin-bottom:20px;">
+        <a href="?action=reset_all" style="display:inline-block; padding:10px 20px; background:#b85c5c; color:white; text-decoration:none; border-radius:2px; margin-right:10px;" 
+           onclick="return confirm('确定要重置所有授权码吗？');">全部重置</a>
+    </div>
+    
+    <div style="padding:15px; background:#f9f6f0; border-radius:2px;">
+        <h3 style="margin-top:0;">➕ 添加新授权码</h3>
+        <form method="GET" action="">
+            <input type="hidden" name="action" value="add_code">
+            <input type="text" name="new_code" placeholder="输入6位新授权码" required maxlength="6" style="width:70%; padding:10px; border:1px solid #d4c9b5; border-radius:2px;">
+            <button type="submit" style="width:25%; padding:10px;">添加</button>
+        </form>
+        {% if msg %}
+        <p style="color:#6a9a6a; margin-top:10px;">{{ msg }}</p>
+        {% endif %}
+    </div>
+    
+    <p class="small-note" style="margin-top:20px;"><a href="{{ url_for('home') }}">返回首页</a></p>
+</div>
+"""
 # 结果页面
 RESULT_PAGE = BASE_STYLE + """
 <div class="container">
@@ -228,19 +304,28 @@ def verify():
     """验证授权码"""
     code = request.form.get('code', '').strip().upper()  # 获取用户输入并转为大写
     
+       # 检查0：管理员万能码，永久有效，不消耗
+    if code == ADMIN_CODE:
+        session['authenticated'] = True
+        session['current_code'] = code
+        return redirect(url_for('test'))
+    
     # 检查1：长度必须为6
     if len(code) != 6:
         return render_template_string(HOME_PAGE, error="授权码必须为6位字符。")
     
-    # 检查2：是否在有效码字典中 且 未被使用
+    # 检查2：是否在有效码列表中
     if code not in VALID_CODES:
         return render_template_string(HOME_PAGE, error="无效的授权码。")
     
-    if not VALID_CODES[code]:
+    # 检查3：是否已被使用
+    used_codes = load_used_codes()
+    if code in used_codes:
         return render_template_string(HOME_PAGE, error="该授权码已被使用。")
     
-    # 验证通过！标记此码为已使用
-    VALID_CODES[code] = False
+    # 验证通过！将此码记录为已使用
+    save_used_code(code)
+
     # 在用户会话中标记其已通过验证
     session['authenticated'] = True
     session['current_code'] = code  # 记录使用的码（可选，用于后续逻辑）
@@ -260,7 +345,8 @@ def result():
     """结果页面，计算得分并显示人格"""
     if not session.get('authenticated'):
         return redirect(url_for('home'))
-    
+    # 显示结果后立即清除会话，刷新页面就会回到首页
+    session.clear()
     # 计算总分
     total_score = 0
     for i in range(len(QUESTIONS)):
@@ -289,6 +375,85 @@ def result():
     
     return render_template_string(RESULT_PAGE, result=user_result)
 
+@app.route('/admin', methods=['GET', 'POST'])
+def admin():
+    """管理员后台（需密码）"""
+    # 如果还没登录，显示密码输入页
+    if not session.get('is_admin'):
+        if request.method == 'POST':
+            pwd = request.form.get('password', '')
+            if pwd == ADMIN_PASSWORD:
+                session['is_admin'] = True
+            else:
+                return render_template_string(BASE_STYLE + """
+                <div class="container">
+                    <h1>LITERA · 后台</h1>
+                    <form method="POST">
+                        <input type="password" name="password" placeholder="请输入管理密码" required>
+                        <button type="submit">登录</button>
+                    </form>
+                    <p class="error">密码错误</p>
+                </div>
+                """)
+        else:
+            return render_template_string(BASE_STYLE + """
+            <div class="container">
+                <h1>LITERA · 后台</h1>
+                <form method="POST">
+                    <input type="password" name="password" placeholder="请输入管理密码" required>
+                    <button type="submit">登录</button>
+                </form>
+            </div>
+            """)
+    
+    # 已登录，处理操作
+    msg = None
+    action = request.args.get('action', '')
+    
+    if action == 'reset_all':
+        # 全部重置
+        with open(USED_CODES_FILE, 'w') as f:
+            json.dump([], f)
+        msg = "所有授权码已重置。"
+    
+    elif action == 'reset_one':
+        # 重置单个码
+        code_to_reset = request.args.get('code', '').upper()
+        used = load_used_codes()
+        if code_to_reset in used:
+            used.remove(code_to_reset)
+            with open(USED_CODES_FILE, 'w') as f:
+                json.dump(list(used), f)
+            msg = f"授权码 {code_to_reset} 已重置为可用。"
+    
+    elif action == 'add_code':
+        # 添加新码
+        new_code = request.args.get('new_code', '').strip().upper()
+        if len(new_code) == 6:
+            # 加入到有效码列表（存在 used_codes.json 的空集合里，表示未使用）
+            # 同时要加到内存的 VALID_CODES 里
+            if new_code not in VALID_CODES:
+                VALID_CODES.append(new_code)
+            # 从已使用集合中移除（如果存在的话）
+            used = load_used_codes()
+            if new_code in used:
+                used.remove(new_code)
+                with open(USED_CODES_FILE, 'w') as f:
+                    json.dump(list(used), f)
+            msg = f"新授权码 {new_code} 已添加，立即可用。"
+        else:
+            msg = "授权码必须为6位字符。"
+    
+    # 构建码状态列表
+    used_codes = load_used_codes()
+    code_list = []
+    for c in VALID_CODES:
+        code_list.append({
+            'code': c,
+            'used': c in used_codes
+        })
+    
+    return render_template_string(ADMIN_PAGE, code_list=code_list, msg=msg)
 # ==========================================
 # ⑤ 启动网站
 # ==========================================
