@@ -7,7 +7,8 @@ import os
 import json
 
 # 记录已使用授权码的文件路径
-USED_CODES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'used_codes.json')
+# 在内存中记录已使用的授权码（Render 免费版不支持文件写入）
+used_codes_set = set()
 
 # --- 初始化 Flask 应用 ---
 app = Flask(__name__)
@@ -35,20 +36,7 @@ VALID_CODES = [
     "TOL444",
 ]
 
-def load_used_codes():
-    """从文件读取已使用的授权码集合"""
-    try:
-        with open(USED_CODES_FILE, 'r') as f:
-            return set(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return set()
 
-def save_used_code(code):
-    """将一个授权码追加到已使用文件"""
-    used = load_used_codes()
-    used.add(code)
-    with open(USED_CODES_FILE, 'w') as f:
-        json.dump(list(used), f)
 
 # 测试题目列表。每道题是一个字典，包含题目、选项，以及每个选项对应的分数
 QUESTIONS = [
@@ -318,13 +306,12 @@ def verify():
     if code not in VALID_CODES:
         return render_template_string(HOME_PAGE, error="无效的授权码。")
     
-    # 检查3：是否已被使用
-    used_codes = load_used_codes()
-    if code in used_codes:
+         # 检查3：是否已被使用
+    if code in used_codes_set:
         return render_template_string(HOME_PAGE, error="该授权码已被使用。")
     
     # 验证通过！将此码记录为已使用
-    save_used_code(code)
+    used_codes_set.add(code)
 
     # 在用户会话中标记其已通过验证
     session['authenticated'] = True
@@ -385,11 +372,12 @@ def admin():
             pwd = request.form.get('password', '')
             if pwd == ADMIN_PASSWORD:
                 session['is_admin'] = True
+                return redirect(url_for('admin'))
             else:
                 return render_template_string(BASE_STYLE + """
                 <div class="container">
                     <h1>LITERA · 后台</h1>
-                    <form method="POST">
+                    <form method="POST" action="{{ url_for('admin') }}">
                         <input type="password" name="password" placeholder="请输入管理密码" required>
                         <button type="submit">登录</button>
                     </form>
@@ -400,7 +388,7 @@ def admin():
             return render_template_string(BASE_STYLE + """
             <div class="container">
                 <h1>LITERA · 后台</h1>
-                <form method="POST">
+                <form method="POST" action="{{ url_for('admin') }}">
                     <input type="password" name="password" placeholder="请输入管理密码" required>
                     <button type="submit">登录</button>
                 </form>
@@ -412,46 +400,37 @@ def admin():
     action = request.args.get('action', '')
     
     if action == 'reset_all':
-        # 全部重置
-        with open(USED_CODES_FILE, 'w') as f:
-            json.dump([], f)
+        # 全部重置：清空内存中的已使用集合
+        used_codes_set.clear()
         msg = "所有授权码已重置。"
     
     elif action == 'reset_one':
         # 重置单个码
         code_to_reset = request.args.get('code', '').upper()
-        used = load_used_codes()
-        if code_to_reset in used:
-            used.remove(code_to_reset)
-            with open(USED_CODES_FILE, 'w') as f:
-                json.dump(list(used), f)
+        if code_to_reset in used_codes_set:
+            used_codes_set.remove(code_to_reset)
             msg = f"授权码 {code_to_reset} 已重置为可用。"
+        else:
+            msg = f"授权码 {code_to_reset} 本来就是可用状态。"
     
     elif action == 'add_code':
         # 添加新码
         new_code = request.args.get('new_code', '').strip().upper()
         if len(new_code) == 6:
-            # 加入到有效码列表（存在 used_codes.json 的空集合里，表示未使用）
-            # 同时要加到内存的 VALID_CODES 里
             if new_code not in VALID_CODES:
                 VALID_CODES.append(new_code)
-            # 从已使用集合中移除（如果存在的话）
-            used = load_used_codes()
-            if new_code in used:
-                used.remove(new_code)
-                with open(USED_CODES_FILE, 'w') as f:
-                    json.dump(list(used), f)
+            # 确保新码不在已使用集合中
+            used_codes_set.discard(new_code)
             msg = f"新授权码 {new_code} 已添加，立即可用。"
         else:
             msg = "授权码必须为6位字符。"
     
     # 构建码状态列表
-    used_codes = load_used_codes()
     code_list = []
     for c in VALID_CODES:
         code_list.append({
             'code': c,
-            'used': c in used_codes
+            'used': c in used_codes_set
         })
     
     return render_template_string(ADMIN_PAGE, code_list=code_list, msg=msg)
