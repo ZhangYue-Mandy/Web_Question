@@ -376,6 +376,7 @@ def result():
     return render_template_string(RESULT_PAGE, result=user_result)
 
 @app.route('/admin', methods=['GET', 'POST'])
+@app.route('/admin/', methods=['GET', 'POST'])
 def admin():
     """管理员后台（需密码）"""
     # 如果还没登录，显示密码输入页
